@@ -11,7 +11,7 @@ import { ThemeIndicator } from "@/components/ThemeIndicator";
 import { Mail, BarChart3, Settings, RefreshCw, Inbox } from "lucide-react";
 import { Email } from "@/lib/types";
 import { generateSupportReply, rewriteDraftShort } from "@/lib/llmClient";
-import { loadEmailsFromCSV } from "@/lib/csvService";
+import { fetchEmails, Provider, checkGmailAuth } from "@/lib/emailService";
 import { mockAnalytics } from "@/lib/mockData";
 import { useToast } from "@/hooks/use-toast";
 
@@ -21,18 +21,31 @@ const Index = () => {
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [source, setSource] = useState<Provider>("csv");
+  const [gmailNeedsAuth, setGmailNeedsAuth] = useState(false);
+  const [gmailAuthUrl, setGmailAuthUrl] = useState<string | null>(null);
   const { toast } = useToast();
 
-  // Load emails from CSV on component mount
+  // Load emails from selected source
   useEffect(() => {
-    loadEmailsFromCSV()
+    // If Gmail selected but not authorized, don't attempt to load yet
+    if (source === 'gmail' && gmailNeedsAuth) {
+      setIsLoading(false);
+  // Clear previous (CSV) emails so UI doesn't show demo while waiting for auth
+  setEmails([]);
+  setFilteredEmails([]);
+  setSelectedEmail(null);
+      return;
+    }
+    setIsLoading(true);
+  fetchEmails(source, { max: source === 'imap' || source === 'gmail' ? 20 : undefined })
       .then((loadedEmails) => {
         setEmails(loadedEmails);
-        setFilteredEmails(loadedEmails); // Initially show all emails
+        setFilteredEmails(loadedEmails);
         setIsLoading(false);
         toast({
           title: "Emails loaded",
-          description: `${loadedEmails.length} emails loaded from CSV file.`,
+          description: `${loadedEmails.length} emails loaded from ${source.toUpperCase()}.`,
         });
       })
       .catch((error) => {
@@ -40,11 +53,33 @@ const Index = () => {
         setIsLoading(false);
         toast({
           title: "Error loading emails",
-          description: "Failed to load emails from CSV file.",
+          description: `Failed to load emails from ${source.toUpperCase()}.`,
           variant: "destructive",
         });
       });
-  }, [toast]);
+  }, [toast, source, gmailNeedsAuth]);
+
+  // Check Gmail auth requirement when switching to Gmail source
+  useEffect(() => {
+    let cancelled = false;
+    if (source === 'gmail') {
+      checkGmailAuth()
+        .then(({ needsAuth, authUrl }) => {
+          if (cancelled) return;
+          setGmailNeedsAuth(!!needsAuth);
+          setGmailAuthUrl(authUrl || null);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setGmailNeedsAuth(false);
+          setGmailAuthUrl(null);
+        });
+    } else {
+      setGmailNeedsAuth(false);
+      setGmailAuthUrl(null);
+    }
+    return () => { cancelled = true; };
+  }, [source]);
 
   // Generate analytics from loaded emails
   const generateAnalytics = (emails: Email[]) => {
@@ -116,18 +151,18 @@ const Index = () => {
   const handleRefreshEmails = async () => {
     setIsRefreshing(true);
     try {
-      const loadedEmails = await loadEmailsFromCSV();
+  const loadedEmails = await fetchEmails(source, { max: source === 'imap' || source === 'gmail' ? 20 : undefined });
       setEmails(loadedEmails);
       setFilteredEmails(loadedEmails); // Reset filtered emails
       toast({
         title: "Emails refreshed",
-        description: `${loadedEmails.length} emails reloaded from CSV file.`,
+        description: `${loadedEmails.length} emails reloaded from ${source.toUpperCase()}.`,
       });
     } catch (error) {
       console.error('Error refreshing emails:', error);
       toast({
         title: "Error refreshing emails",
-        description: "Failed to refresh emails from CSV file.",
+        description: `Failed to refresh emails from ${source.toUpperCase()}.`,
         variant: "destructive",
       });
     } finally {
@@ -251,15 +286,30 @@ const Index = () => {
 
           <TabsContent value="inbox" className="space-y-8">
             {isLoading ? (
-              <div className="flex items-center justify-center min-h-[400px]">
+        <div className="flex items-center justify-center min-h-[400px]">
                 <div className="text-center">
                   <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-4 text-primary" />
                   <h3 className="text-lg font-semibold mb-2">Loading Emails</h3>
-                  <p className="text-muted-foreground">Reading emails from CSV file...</p>
+          <p className="text-muted-foreground">Loading emails from {source.toUpperCase()}...</p>
                 </div>
               </div>
             ) : (
               <div className="space-y-6">
+                {source === 'gmail' && gmailNeedsAuth && (
+                  <div className="glass p-4 rounded-lg flex items-center justify-between">
+                    <div>
+                      <h4 className="font-semibold">Connect Gmail</h4>
+                      <p className="text-sm text-muted-foreground">Authorize Gmail to load your inbox, then click Refresh Emails.</p>
+                    </div>
+                    <Button
+                      onClick={() => {
+                        if (gmailAuthUrl) window.open(gmailAuthUrl, '_blank', 'noopener,noreferrer');
+                      }}
+                    >
+                      Connect Gmail
+                    </Button>
+                  </div>
+                )}
                 {/* Email Filter */}
                 <EmailFilter
                   emails={emails}
@@ -311,6 +361,41 @@ const Index = () => {
               <CardContent>
                 <div className="space-y-6">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="glass p-6 rounded-xl hover-lift">
+                      <h4 className="font-bold text-lg mb-3">Email Source</h4>
+                      <p className="text-sm text-muted-foreground mb-4">Select where to load emails from</p>
+                      <div className="flex flex-wrap gap-2">
+                        {(["csv", "gmail", "outlook", "imap"] as Provider[]).map((p) => (
+                          <button
+                            key={p}
+                            onClick={() => setSource(p)}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                              source === p
+                                ? 'bg-primary text-primary-foreground border-primary'
+                                : 'bg-background hover:bg-muted border-border'
+                            }`}
+                          >
+                            {p.toUpperCase()}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-3">Gmail/Outlook/IMAP require the local server. CSV works offline.</p>
+                      {source === 'gmail' && gmailNeedsAuth && (
+                        <div className="mt-4 flex items-center gap-3">
+                          <Button
+                            onClick={() => {
+                              if (gmailAuthUrl) {
+                                window.open(gmailAuthUrl, '_blank', 'noopener,noreferrer');
+                              }
+                            }}
+                            className="gap-2"
+                          >
+                            Connect Gmail
+                          </Button>
+                          <span className="text-sm text-muted-foreground">Authorize Gmail, then click Refresh Emails.</span>
+                        </div>
+                      )}
+                    </div>
                     <div className="glass p-6 rounded-xl hover-lift">
                       <h4 className="font-bold text-lg mb-3">Theme Settings</h4>
                       <p className="text-sm text-muted-foreground mb-4">
